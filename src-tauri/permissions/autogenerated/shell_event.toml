@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-shell-event"
+description = "Enables the shell_event command without any pre-configured scope."
+commands.allow = ["shell_event"]
+
+[[permission]]
+identifier = "deny-shell-event"
+description = "Denies the shell_event command without any pre-configured scope."
+commands.deny = ["shell_event"]

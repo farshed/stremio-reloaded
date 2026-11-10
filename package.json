@@ -1,0 +1,14 @@
+{
+  "name": "stremio-shell-tauri",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "sidecars": "bun scripts/fetch-sidecars.ts",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "bundle:mac": "tauri build --bundles app && bun scripts/bundle-macos.ts"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}
