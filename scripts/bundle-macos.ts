@@ -14,6 +14,18 @@ const app = join(bundleDir, "macos", `${productName}.app`);
 const macosDir = join(app, "Contents", "MacOS");
 const frameworksDir = join(app, "Contents", "Frameworks");
 const dmg = join(bundleDir, "dmg", `${productName}_${version}_${process.arch}.dmg`);
+const nodeEntitlements = join(root, "src-tauri", "node.entitlements");
+
+const identity = process.env.MACOS_SIGNING_IDENTITY;
+const notarization = {
+  key: process.env.APPLE_NOTARIZATION_KEY,
+  keyId: process.env.APPLE_NOTARIZATION_KEY_ID,
+  issuer: process.env.APPLE_NOTARIZATION_ISSUER_ID,
+};
+const notarize = Boolean(identity && notarization.key && notarization.keyId && notarization.issuer);
+const signFlags = identity
+  ? ["--sign", identity, ...(notarize ? ["--timestamp", "--options", "runtime"] : ["--timestamp=none"])]
+  : ["--sign", "-", "--timestamp=none"];
 
 const isSystemLibrary = (path: string) => path.startsWith("/usr/lib/") || path.startsWith("/System/");
 
@@ -99,18 +111,62 @@ async function bundleLibraries() {
   console.log(`bundled ${nameByRealPath.size} libraries into Contents/Frameworks`);
 }
 
-async function signApp() {
-  for (const entry of await readdir(frameworksDir)) {
-    await $`codesign --force --sign - --timestamp=none ${join(frameworksDir, entry)}`.quiet();
+async function minimumSystemVersion(binary: string): Promise<string | null> {
+  const lines = (await $`otool -l ${binary}`.nothrow().quiet().text()).split("\n");
+  const index = lines.findIndex((line) => line.includes("cmd LC_BUILD_VERSION") || line.includes("cmd LC_VERSION_MIN_MACOSX"));
+  if (index < 0) return null;
+  const line = lines.slice(index, index + 6).find((l) => /^\s*(minos|version) /.test(l));
+  return line?.trim().split(/\s+/)[1] ?? null;
+}
+
+function newerVersion(a: string, b: string): string {
+  const [pa, pb] = [a, b].map((v) => v.split(".").map(Number));
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0) ? a : b;
   }
+  return a;
+}
+
+async function setMinimumSystemVersion() {
+  let minimum = "10.13";
+  for (const dir of [macosDir, frameworksDir]) {
+    for (const entry of await readdir(dir)) {
+      const found = await minimumSystemVersion(join(dir, entry));
+      if (found) minimum = newerVersion(minimum, found);
+    }
+  }
+  await $`plutil -replace LSMinimumSystemVersion -string ${minimum} ${join(app, "Contents", "Info.plist")}`;
+  console.log(`needs macOS ${minimum} or later`);
+}
+
+async function sign(path: string, extra: string[] = []) {
+  await $`codesign --force ${signFlags} ${extra} ${path}`.quiet();
+}
+
+async function signApp() {
+  for (const entry of await readdir(frameworksDir)) await sign(join(frameworksDir, entry));
   for (const entry of await readdir(macosDir)) {
     const path = join(macosDir, entry);
-    const signed = await $`codesign --verify ${path}`.nothrow().quiet();
-    if (signed.exitCode !== 0) await $`codesign --force --sign - --timestamp=none ${path}`.quiet();
+    if (!identity && (await $`codesign --verify ${path}`.nothrow().quiet()).exitCode === 0) continue;
+    await sign(path, entry === "node" ? ["--entitlements", nodeEntitlements] : []);
   }
-  await $`codesign --force --sign - --timestamp=none ${app}`.quiet();
+  await sign(app);
   await $`codesign --verify --deep --strict ${app}`;
-  console.log("signed for local use (ad-hoc)");
+  console.log(identity ? `signed with "${identity}"` : "signed for local use (ad-hoc)");
+}
+
+async function notarizeDmg() {
+  const keyDir = await mkdtemp(join(tmpdir(), "stremio-notary-"));
+  try {
+    const keyFile = join(keyDir, "key.p8");
+    await Bun.write(keyFile, notarization.key!);
+    await sign(dmg);
+    await $`xcrun notarytool submit ${dmg} --key ${keyFile} --key-id ${notarization.keyId!} --issuer ${notarization.issuer!} --wait`;
+    await $`xcrun stapler staple ${dmg}`;
+  } finally {
+    await rm(keyDir, { recursive: true, force: true });
+  }
+  console.log("notarized");
 }
 
 async function checkNoExternalLibraries() {
@@ -145,5 +201,7 @@ async function makeDmg() {
 if (!existsSync(app)) throw new Error(`${app} not found; run \`bun run tauri build --bundles app\` first`);
 await bundleLibraries();
 await checkNoExternalLibraries();
+await setMinimumSystemVersion();
 await signApp();
 await makeDmg();
+if (notarize) await notarizeDmg();

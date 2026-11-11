@@ -5,12 +5,17 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const NODE_VERSION = "v24.22.2";
+const FFMPEG_BRANCH = "8.1";
+const FFMPEG_RELEASES = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest";
 
 const root = resolve(import.meta.dir, "..");
 const binDir = join(root, "src-tauri", "binaries");
 const resDir = join(root, "src-tauri", "resources");
 const serverUrlFile = resolve(root, "server-url.txt");
 const force = process.argv.includes("--force");
+// GNU tar from Git can shadow the Windows one, and it cannot read zip files.
+const tar = process.platform === "win32" ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
+const downloadFfmpeg = process.argv.includes("--download-ffmpeg");
 
 const nodePlatforms: Record<string, { dist: string; ext: "tar.gz" | "tar.xz" | "zip" }> = {
   "aarch64-apple-darwin": { dist: "darwin-arm64", ext: "tar.gz" },
@@ -19,6 +24,13 @@ const nodePlatforms: Record<string, { dist: string; ext: "tar.gz" | "tar.xz" | "
   "aarch64-pc-windows-msvc": { dist: "win-arm64", ext: "zip" },
   "x86_64-unknown-linux-gnu": { dist: "linux-x64", ext: "tar.xz" },
   "aarch64-unknown-linux-gnu": { dist: "linux-arm64", ext: "tar.xz" },
+};
+
+const ffmpegPlatforms: Record<string, { dist: string; ext: "tar.xz" | "zip" }> = {
+  "x86_64-pc-windows-msvc": { dist: "win64", ext: "zip" },
+  "aarch64-pc-windows-msvc": { dist: "winarm64", ext: "zip" },
+  "x86_64-unknown-linux-gnu": { dist: "linux64", ext: "tar.xz" },
+  "aarch64-unknown-linux-gnu": { dist: "linuxarm64", ext: "tar.xz" },
 };
 
 async function hostTriple(): Promise<string> {
@@ -40,6 +52,29 @@ function sha256(data: ArrayBuffer): string {
   return new Bun.CryptoHasher("sha256").update(data).digest("hex");
 }
 
+async function checksumFrom(sumsUrl: string, file: string): Promise<string | undefined> {
+  return new TextDecoder()
+    .decode(await download(sumsUrl))
+    .split("\n")
+    .find((l) => l.trim().endsWith(` ${file}`) || l.trim().endsWith(`*${file}`))
+    ?.split(/\s+/)[0];
+}
+
+async function extract(data: ArrayBuffer, archive: string, members: string[], outputs: string[]) {
+  const work = await mkdtemp(join(tmpdir(), "stremio-sidecar-"));
+  try {
+    const archivePath = join(work, archive);
+    await Bun.write(archivePath, data);
+    await $`${tar} -xf ${archivePath} -C ${work} ${members}`;
+    for (const [i, member] of members.entries()) {
+      await copyFile(join(work, member), outputs[i]);
+      await chmod(outputs[i], 0o755);
+    }
+  } finally {
+    await rm(work, { recursive: true, force: true });
+  }
+}
+
 async function fetchNode(triple: string, exe: string) {
   const out = join(binDir, `node-${triple}${exe}`);
   if (existsSync(out) && !force) return console.log(`node: already present (${out})`);
@@ -51,25 +86,9 @@ async function fetchNode(triple: string, exe: string) {
   const base = `https://nodejs.org/dist/${NODE_VERSION}`;
 
   console.log(`node: downloading ${archive}`);
-  const [data, sums] = await Promise.all([download(`${base}/${archive}`), download(`${base}/SHASUMS256.txt`)]);
-  const expected = new TextDecoder()
-    .decode(sums)
-    .split("\n")
-    .find((l) => l.endsWith(`  ${archive}`))
-    ?.split(" ")[0];
+  const [data, expected] = await Promise.all([download(`${base}/${archive}`), checksumFrom(`${base}/SHASUMS256.txt`, archive)]);
   if (!expected || expected !== sha256(data)) throw new Error(`Checksum mismatch for ${archive}`);
-
-  const work = await mkdtemp(join(tmpdir(), "stremio-node-"));
-  try {
-    const archivePath = join(work, archive);
-    await Bun.write(archivePath, data);
-    const member = exe ? `${name}/node.exe` : `${name}/bin/node`;
-    await $`tar -xf ${archivePath} -C ${work} ${member}`;
-    await copyFile(join(work, member), out);
-    await chmod(out, 0o755);
-  } finally {
-    await rm(work, { recursive: true, force: true });
-  }
+  await extract(data, archive, [exe ? `${name}/node.exe` : `${name}/bin/node`], [out]);
   console.log(`node: ${NODE_VERSION} -> ${out}`);
 }
 
@@ -79,6 +98,25 @@ async function fetchServer() {
   const url = (await Bun.file(serverUrlFile).text()).trim();
   console.log(`server.js: downloading ${url}`);
   await Bun.write(out, await download(url));
+}
+
+async function fetchFfmpegTools(triple: string, exe: string) {
+  const outputs = ["ffmpeg", "ffprobe"].map((tool) => join(binDir, `${tool}-${triple}${exe}`));
+  if (outputs.every((out) => existsSync(out)) && !force) return console.log("ffmpeg: already present");
+
+  const platform = ffmpegPlatforms[triple];
+  if (!platform) throw new Error(`No static ffmpeg build for target ${triple}; set FFMPEG_DIR instead`);
+  const name = `ffmpeg-n${FFMPEG_BRANCH}-latest-${platform.dist}-gpl-${FFMPEG_BRANCH}`;
+  const archive = `${name}.${platform.ext}`;
+
+  console.log(`ffmpeg: downloading ${archive}`);
+  const [data, expected] = await Promise.all([
+    download(`${FFMPEG_RELEASES}/${archive}`),
+    checksumFrom(`${FFMPEG_RELEASES}/checksums.sha256`, archive),
+  ]);
+  if (!expected || expected !== sha256(data)) throw new Error(`Checksum mismatch for ${archive}`);
+  await extract(data, archive, ["ffmpeg", "ffprobe"].map((tool) => `${name}/bin/${tool}${exe}`), outputs);
+  console.log(`ffmpeg: ${archive} -> ${binDir}`);
 }
 
 async function copyFfmpegTools(triple: string, exe: string) {
@@ -106,4 +144,4 @@ await mkdir(binDir, { recursive: true });
 await mkdir(resDir, { recursive: true });
 await fetchNode(triple, exe);
 await fetchServer();
-await copyFfmpegTools(triple, exe);
+await (downloadFfmpeg ? fetchFfmpegTools(triple, exe) : copyFfmpegTools(triple, exe));

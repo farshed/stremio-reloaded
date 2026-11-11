@@ -1,0 +1,217 @@
+name: release
+on:
+  push:
+    tags:
+      - v*
+permissions:
+  contents: write
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  ASSET_PREFIX: Stremio-Shell
+jobs:
+  check_version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Check that the tag matches the app version
+        run: |
+          app_version=$(jq -r .version src-tauri/tauri.conf.json)
+          crate_version=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          if [ "v${app_version}" != "${GITHUB_REF_NAME}" ] || [ "${app_version}" != "${crate_version}" ]; then
+            echo "Tag ${GITHUB_REF_NAME}, tauri.conf.json ${app_version} and Cargo.toml ${crate_version} must match"
+            exit 1
+          fi
+      - name: Check that the changelog has entries for this version
+        run: bun scripts/changelog-section.ts "${GITHUB_REF_NAME#v}" >/dev/null
+
+  bundle_mac:
+    needs: check_version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install libmpv and ffmpeg
+        run: brew install mpv ffmpeg pkgconf
+      - run: bun install --frozen-lockfile
+      - name: Fetch sidecars
+        run: bun run sidecars
+      - name: Import signing certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE" ]; then
+            echo "No MACOS_CERTIFICATE secret, so the app is ad-hoc signed"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          certificate="$RUNNER_TEMP/certificate.p12"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$MACOS_CERTIFICATE_PASSWORD" "$keychain"
+          security set-keychain-settings "$keychain"
+          security unlock-keychain -p "$MACOS_CERTIFICATE_PASSWORD" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CERTIFICATE_PASSWORD" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$certificate"
+          echo "MACOS_SIGNING_IDENTITY=$MACOS_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+      - name: Bundle
+        env:
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+        run: |
+          rm -rf src-tauri/target/release/bundle
+          bun run bundle:mac
+      - name: Collect
+        run: |
+          mkdir dist
+          cp src-tauri/target/release/bundle/dmg/*.dmg "dist/${ASSET_PREFIX}-macos-${{ matrix.arch }}.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  bundle_linux:
+    needs: check_version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config file patchelf libfuse2t64 \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev libmpv-dev
+      - run: bun install --frozen-lockfile
+      - name: Fetch sidecars
+        run: bun run sidecars --download-ffmpeg
+      - name: Bundle
+        run: |
+          rm -rf src-tauri/target/release/bundle
+          bun run tauri build --bundles deb,appimage
+      - name: Collect
+        run: |
+          mkdir dist
+          cp src-tauri/target/release/bundle/deb/*.deb "dist/${ASSET_PREFIX}-linux-${{ matrix.arch }}.deb"
+          cp src-tauri/target/release/bundle/appimage/*.AppImage "dist/${ASSET_PREFIX}-linux-${{ matrix.arch }}.AppImage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  bundle_windows:
+    needs: check_version
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - uses: ilammy/msvc-dev-cmd@v1
+      # The libmpv builds only ship a MinGW import library, so mpv.lib is made from the DLL's exports.
+      - name: Fetch libmpv
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = Invoke-RestMethod -Uri https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest -Headers @{ Authorization = "Bearer $env:GH_TOKEN" }
+          $asset = $release.assets | Where-Object name -Match '^mpv-dev-x86_64-\d{8}-git-' | Select-Object -First 1
+          if (-not $asset) { throw "No x86_64 libmpv build in release $($release.tag_name)" }
+          Write-Output "libmpv: $($asset.name)"
+          $archive = Join-Path $env:RUNNER_TEMP mpv-dev.7z
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive
+          $dir = New-Item -ItemType Directory -Force src-tauri/libmpv
+          7z x $archive "-o$dir" libmpv-2.dll
+          if ($LASTEXITCODE -ne 0) { throw "Could not extract libmpv-2.dll" }
+          $names = dumpbin /exports "$dir/libmpv-2.dll" | ForEach-Object { if ($_ -match '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(mpv_\w+)') { $Matches[1] } }
+          if (-not $names) { throw "No mpv exports found in libmpv-2.dll" }
+          $def = Join-Path $env:RUNNER_TEMP mpv.def
+          Set-Content -Path $def -Value (@("EXPORTS") + $names)
+          lib /nologo "/def:$def" /name:libmpv-2.dll /machine:x64 "/out:$dir/mpv.lib"
+          if ($LASTEXITCODE -ne 0) { throw "Could not create mpv.lib" }
+          "MPV_LIB_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - run: bun install --frozen-lockfile
+      - name: Fetch sidecars
+        run: bun run sidecars --download-ffmpeg
+      - name: Bundle
+        run: |
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue src-tauri/target/release/bundle
+          bun run tauri build --bundles nsis
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          Copy-Item $installer "dist/$env:ASSET_PREFIX-windows-x86_64-setup.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [bundle_mac, bundle_linux, bundle_windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Fetch tags for the changelog link
+        run: git fetch --quiet --tags --force --depth=1 origin
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Write the release body
+        run: |
+          {
+            cat .github/release/body.md
+            echo
+            echo "## What's new"
+            echo
+            bun scripts/changelog-section.ts "${GITHUB_REF_NAME#v}"
+            previous=$(git tag --sort=-v:refname | grep -A1 -x "${GITHUB_REF_NAME}" | tail -n +2)
+            if [ -n "$previous" ]; then
+              echo
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${previous}...${GITHUB_REF_NAME}"
+            fi
+          } > release-body.md
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release-body.md
+          files: artifacts/**
