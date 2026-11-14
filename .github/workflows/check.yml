@@ -1,0 +1,39 @@
+name: check
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+jobs:
+  test_linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config xvfb libgl1-mesa-dri \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev libmpv-dev
+      # The tests never start the sidecars, so empty files are enough for tauri-build.
+      - name: Stub sidecars
+        run: |
+          mkdir -p src-tauri/binaries src-tauri/resources
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          for tool in node ffmpeg ffprobe; do touch "src-tauri/binaries/$tool-$triple"; done
+          touch src-tauri/resources/server.js
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        working-directory: src-tauri
+        run: xvfb-run -a cargo test

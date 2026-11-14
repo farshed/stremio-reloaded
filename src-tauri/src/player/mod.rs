@@ -3,7 +3,10 @@ mod mpv;
 #[cfg(target_os = "macos")]
 #[path = "video_macos.rs"]
 mod video;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+#[path = "video_linux.rs"]
+mod video;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[path = "video_unsupported.rs"]
 mod video;
 

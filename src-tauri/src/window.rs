@@ -21,9 +21,9 @@ pub const MAIN_WINDOW: &str = "main";
 const APP_TITLE: &str = "Stremio - Freedom to Stream";
 const BRIDGE_SCRIPT: &str = include_str!("bridge.js");
 const WEB_UI_TWEAKS_SCRIPT: &str = include_str!("web_ui_tweaks.js");
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const WEBVIEW_BACKGROUND: Color = Color(0, 0, 0, 0);
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 const WEBVIEW_BACKGROUND: Color = Color(0x0c, 0x0b, 0x11, 0xff);
 const MIN_SIZE: (f64, f64) = (1000.0, 650.0);
 const MAX_INITIAL_SIZE: (f64, f64) = (1600.0, 1000.0);
@@ -87,6 +87,7 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>>
         .min_inner_size(MIN_SIZE.0, MIN_SIZE.1)
         .center()
         .background_color(WEBVIEW_BACKGROUND)
+        .transparent(cfg!(target_os = "linux"))
         .initialization_script(BRIDGE_SCRIPT)
         .initialization_script(WEB_UI_TWEAKS_SCRIPT)
         .on_navigation(move |url| is_navigation_allowed(&rules, url))

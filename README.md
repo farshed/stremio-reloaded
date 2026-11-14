@@ -41,4 +41,4 @@ macOS signing is optional. Without secrets the app is ad-hoc signed. Set `MACOS_
 
 ## Status
 
-Video output is implemented on macOS only. Windows and Linux currently play audio only.
+Video output is implemented on macOS and Linux. Windows currently plays audio only.

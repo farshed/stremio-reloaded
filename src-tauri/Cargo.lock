@@ -3740,6 +3740,7 @@ name = "stremio-shell"
 version = "4.4.183"
 dependencies = [
  "dispatch2",
+ "gtk",
  "keepawake",
  "libc",
  "libmpv2-sys",
