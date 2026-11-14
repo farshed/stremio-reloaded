@@ -12,10 +12,13 @@ type GLint = c_int;
 
 const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
 const GL_DRAW_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
+const GL_FRAMEBUFFER: u32 = 0x8D40;
 const BACKGROUND: [f32; 3] = [12.0 / 255.0, 11.0 / 255.0, 17.0 / 255.0];
 
+#[derive(Clone, Copy)]
 struct Gl {
     get_integerv: unsafe extern "C" fn(u32, *mut GLint),
+    bind_framebuffer: unsafe extern "C" fn(u32, u32),
     clear_color: unsafe extern "C" fn(f32, f32, f32, f32),
     clear: unsafe extern "C" fn(u32),
 }
@@ -153,6 +156,7 @@ fn load_gl() -> Option<Gl> {
     unsafe {
         Some(Gl {
             get_integerv: load(c"glGetIntegerv")?,
+            bind_framebuffer: load(c"glBindFramebuffer")?,
             clear_color: load(c"glClearColor")?,
             clear: load(c"glClear")?,
         })
@@ -164,15 +168,17 @@ fn render_frame(width: i32, height: i32) {
     if state.gl.is_none() {
         state.gl = load_gl();
     }
-    if state.context.is_null() && !state.mpv.is_null() {
-        state.context = create_render_context(state.mpv);
-    }
-    let Some(gl) = state.gl.as_ref() else {
+    let Some(gl) = state.gl else {
         return;
     };
-
     let mut fbo: GLint = 0;
     unsafe { (gl.get_integerv)(GL_DRAW_FRAMEBUFFER_BINDING, &mut fbo) };
+
+    if state.context.is_null() && !state.mpv.is_null() {
+        state.context = create_render_context(state.mpv);
+        // Creating the render context binds mpv's own framebuffer.
+        unsafe { (gl.bind_framebuffer)(GL_FRAMEBUFFER, fbo as u32) };
+    }
 
     if state.context.is_null() || !state.has_video {
         unsafe {
