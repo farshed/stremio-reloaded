@@ -35,7 +35,7 @@ pub fn run() {
         .manage(web_ui::WebUi::default())
         .invoke_handler(tauri::generate_handler![transport::shell_props, transport::shell_event])
         .setup(move |app| {
-            log::info!("Stremio Shell version: {}", app.package_info().version);
+            log::info!("Stremio Reloaded version: {}", app.package_info().version);
             let launch_server = options.launch_server;
             let media_to_open = options.media_to_open.clone();
             app.manage(options);

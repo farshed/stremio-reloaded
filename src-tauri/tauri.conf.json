@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Stremio Shell",
+  "productName": "Stremio Reloaded",
   "version": "4.4.183",
-  "identifier": "com.stremio.desktop",
+  "identifier": "io.github.farshed.stremio-reloaded",
   "build": {
     "frontendDist": "https://app.strem.io/shell-v4.4/"
   },

@@ -31,7 +31,7 @@ impl Screensaver {
                 .idle(true)
                 .reason("Playing video")
                 .app_name("Stremio")
-                .app_reverse_domain("com.stremio.desktop")
+                .app_reverse_domain("io.github.farshed.stremio-reloaded")
                 .create()
                 .map_err(|err| log::warn!("could not block the screensaver: {err}"))
                 .ok()

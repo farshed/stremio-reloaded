@@ -18,7 +18,7 @@ use crate::web_ui::{self, WebUi};
 use crate::{player, tray};
 
 pub const MAIN_WINDOW: &str = "main";
-const APP_TITLE: &str = "Stremio - Freedom to Stream";
+const APP_TITLE: &str = "Stremio Reloaded";
 const BRIDGE_SCRIPT: &str = include_str!("bridge.js");
 const WEB_UI_TWEAKS_SCRIPT: &str = include_str!("web_ui_tweaks.js");
 #[cfg(any(target_os = "macos", target_os = "linux"))]
